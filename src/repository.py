@@ -65,6 +65,22 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope TEXT NOT NULL,
+                    planned_review_date TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open'
+                        CHECK(status IN ('open','closed')),
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS batch_items (
+                    batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    PRIMARY KEY (batch_id, item_id)
+                );
             """)
 
     @staticmethod
@@ -156,6 +172,80 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def create_batch(self, scope: str, planned_review_date: str,
+                     item_ids: List[int], actor: str) -> tuple:
+        now = utc_now()
+        with self._lock, self.conn:
+            placeholders = ",".join("?" for _ in item_ids)
+            row = self.conn.execute(
+                f"""SELECT b.id FROM batches b
+                    JOIN batch_items bi ON bi.batch_id=b.id
+                    WHERE b.status='open' AND bi.item_id IN ({placeholders})
+                    ORDER BY b.id LIMIT 1""",
+                tuple(item_ids),
+            ).fetchone()
+            if row is not None:
+                return self.get_batch(int(row["id"])), False
+            cur = self.conn.execute(
+                """INSERT INTO batches(scope, planned_review_date, status, version,
+                   created_by, created_at) VALUES(?,?,?,?,?,?)""",
+                (scope, planned_review_date, "open", 1, actor, now),
+            )
+            batch_id = int(cur.lastrowid)
+            self.conn.executemany(
+                "INSERT INTO batch_items(batch_id, item_id) VALUES(?,?)",
+                [(batch_id, item_id) for item_id in item_ids],
+            )
+        return self.get_batch(batch_id), True
+
+    def get_batch(self, batch_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("批次不存在")
+        return dict(row)
+
+    def list_batches(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM batches"
+        params: tuple = ()
+        if status:
+            sql += " WHERE status=?"
+            params = (status,)
+        sql += " ORDER BY id DESC"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def batch_items(self, batch_id: int) -> List[Dict[str, Any]]:
+        self.get_batch(batch_id)
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT i.*, (SELECT COUNT(*) FROM records r
+                       WHERE r.item_id=i.id AND r.status='open') AS open_records
+                   FROM batch_items bi JOIN items i ON i.id=bi.item_id
+                   WHERE bi.batch_id=? ORDER BY i.id""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close_batch(self, batch_id: int, expected_version: int,
+                    actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE batches SET status='closed', closed_at=?, version=version+1
+                   WHERE id=? AND version=? AND status='open'""",
+                (now, batch_id, expected_version),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM batches WHERE id=?", (batch_id,)).fetchone()
+                if exists is None:
+                    raise NotFoundError("批次不存在")
+                raise ConflictError("版本冲突，请刷新后重试")
+        return self.get_batch(batch_id)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

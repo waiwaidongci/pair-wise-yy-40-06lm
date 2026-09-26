@@ -31,8 +31,18 @@ python3 app.py --db ./data.db --port 8317
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
+- `GET /api/batches?state=active|closable|closed`
+- `POST /api/batches`
+- `GET /api/batches/{id}`
+- `POST /api/batches/{id}/close`，必须提交`expected_version`
 
 允许角色：assessor, structural_engineer, review_board, viewer。风险分值和人员密度共同影响排序；审核通过前必须完成评估、设计和施工证据登记。
+
+## 鉴定批次
+
+评估员（assessor）通过`POST /api/batches`把多个项目选入批次，提交`scope`、`planned_review_date`（YYYY-MM-DD）和`item_ids`。同一项目只能出现在一个未结束批次中：若所选项目已在进行中批次里，接口返回原批次（HTTP 200，`created=false`）而不新建。
+
+批次优先级按批内最紧急项目、未关闭事项总数和最近剩余期限实时重算。批内项目全部到达终态（accepted/rejected）且无未关闭事项时，总工（structural_engineer）才能关闭批次；否则关闭返回409并列出阻塞项目及原因，批次详情的`blockers`字段同样可见。列表接口的`state`筛选：`active`进行中、`closable`待关闭、`closed`已关闭。批次规则在`src/rules.py`，持久化在`src/repository.py`，接口在`src/http_api.py`。
 
 ## 测试
 
