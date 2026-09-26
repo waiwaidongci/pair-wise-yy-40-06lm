@@ -20,3 +20,26 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+BATCH_ENTITY='鉴定批次'; BATCH_STATES=['active','closed']; ACTIVE_BATCH=BATCH_STATES[0]; CLOSED_BATCH=BATCH_STATES[-1]
+BATCH_CREATE_ROLES=set(['assessor']); BATCH_CLOSE_ROLES=set(['chief_engineer']); BATCH_VIEW_ROLES=set(['assessor','structural_engineer','review_board','viewer','chief_engineer'])
+def batch_blockers(entries):
+    blockers=[]
+    for entry in entries:
+        reasons=[]
+        if entry['status'] not in TERMINAL_STATES: reasons.append(f"项目未到终态({entry['status']})")
+        if entry['open_records']>0: reasons.append(f"未关闭事项{entry['open_records']}项")
+        if reasons: blockers.append({'item_id':entry['item_id'],'title':entry.get('title'),'reasons':reasons})
+    return blockers
+def days_remaining(planned_date,today=None):
+    from datetime import date
+    if today is None: today=date.today()
+    if isinstance(today,str): today=date.fromisoformat(today)
+    if isinstance(planned_date,str): planned_date=date.fromisoformat(planned_date)
+    return (planned_date-today).days
+def batch_priority(max_item_priority,total_open_records,remaining_days):
+    if remaining_days<0: urgency=3
+    elif remaining_days<=1: urgency=2
+    elif remaining_days<=3: urgency=1
+    else: urgency=0
+    score=max_item_priority/2.0+min(2,total_open_records)+urgency
+    return max(0,min(10,int(round(score))))
